@@ -5,7 +5,7 @@ require("dotenv").config();
 
 const app = express();
 
-// ✅ 環境変数の読み込み確認ログ（デバッグ用）
+// ✅ デバッグログでAPIキーの読み込み確認
 console.log("🔐 API KEY LOADED:", process.env.OPENAI_API_KEY ? "✅ Yes" : "❌ No");
 
 const config = {
@@ -62,4 +62,18 @@ async function askChatGPT(text, retryCount = 0) {
 
     if (status === 429 && retryCount < 3) {
       console.warn("⏳ 429 Too Many Requests - Retrying in 2 seconds...");
-      await new Promise(resolve => setTimeout(resolve,
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return askChatGPT(text, retryCount + 1);
+    } else {
+      console.error("❌ ChatGPT API error:", status, error.response?.data || error.message);
+      // throw error; // ← コメントアウトしておくと落ちにくくなります
+      return "申し訳ありません。現在応答できません。";
+    }
+  }
+}
+
+// ✅ Render対応：環境変数PORTを使う
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Bot running on port ${PORT}`);
+});
