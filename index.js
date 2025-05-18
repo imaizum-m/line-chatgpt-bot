@@ -47,7 +47,17 @@ async function askChatGPT(text, retryCount = 0) {
       "https://api.openai.com/v1/chat/completions",
       {
         model: "gpt-3.5-turbo",
-        messages: [{ role: "user", content: text }]
+        messages: [
+          {
+            role: "system",
+            content:
+              "あなたはDIYやリフォームの専門家です。DIY工具、リフォームの施工方法、建材、ホームセンター商品などの質問にのみ専門的に答えてください。それ以外の質問には『その分野は専門外のためお答えできません』と返答してください。"
+          },
+          {
+            role: "user",
+            content: text
+          }
+        ]
       },
       {
         headers: {
@@ -66,7 +76,6 @@ async function askChatGPT(text, retryCount = 0) {
       return askChatGPT(text, retryCount + 1);
     } else {
       console.error("❌ ChatGPT API error:", status, error.response?.data || error.message);
-      // throw error; // ← コメントアウトしておくと落ちにくくなります
       return "申し訳ありません。現在応答できません。";
     }
   }
