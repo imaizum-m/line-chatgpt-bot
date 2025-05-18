@@ -1,7 +1,4 @@
-// line-chatgpt-bot Ver.1.6（ベース：Ver.1.5.1）
-// - ChatGPT応答の冒頭にユーザー名＋感謝／共感文を付加
-// - Flex Messageボタンリンク付き（サムネイルなし）
-// - Quick Reply：ChatGPT応答内容に応じて動的生成
+// 📌 Ver.1.6 - ユーザー名への共感・感謝表現を追加した安定版
 
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
@@ -18,52 +15,6 @@ const config = {
 
 const client = new Client(config);
 
-// 🔽 Amazon/Rakuten URL生成用
-function buildSearchLinks(keyword) {
-  const encoded = encodeURIComponent(keyword);
-  return {
-    amazon: `https://www.amazon.co.jp/s?k=${encoded}`,
-    rakuten: `https://search.rakuten.co.jp/search/mall/${encoded}/`
-  };
-}
-
-// 🔽 ChatGPT用メッセージ整形
-function buildSystemPrompt(userName) {
-  return `あなたはDIYと住宅リフォームの専門家アシスタントです。ユーザーからの質問には、住宅内外の改修、工具、塗料、建材、施工方法などに関する専門的な知識を使って、正確で実用的な回答を行ってください。商品情報が該当する場合はAmazonと楽天市場のリンクを案内してください。なお、${userName}さんへの返答には冒頭に感謝や共感の一言を添えてください。`;
-}
-
-// 🔽 Quick Reply 候補をChatGPT応答から動的生成
-async function generateQuickReplies(replyText) {
-  try {
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: "ユーザーの質問に対する回答をもとに、内容を深掘りする質問を4つ考えてください。回答できない内容は含めず、短く簡潔にしてください。" },
-          { role: "user", content: replyText }
-        ]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    const suggestions = response.data.choices[0].message.content
-      .split("\n")
-      .filter(line => line.trim())
-      .slice(0, 4);
-
-    return suggestions.map(text => ({ type: "action", action: { type: "message", label: text.slice(0, 20), text } }));
-  } catch (e) {
-    console.warn("QuickReply生成失敗:", e.message);
-    return [];
-  }
-}
-
 app.post("/webhook", middleware(config), async (req, res) => {
   const events = req.body.events;
 
@@ -71,54 +22,75 @@ app.post("/webhook", middleware(config), async (req, res) => {
     if (event.type === "message" && event.message.type === "text") {
       const userText = event.message.text;
       const userId = event.source.userId;
-      const profile = await client.getProfile(userId);
-      const userName = profile.displayName || "ユーザー";
 
       try {
-        const reply = await askChatGPT(userText, userName);
-        const quickReplies = await generateQuickReplies(reply.clean);
-        const links = buildSearchLinks(reply.keyword);
+        const profile = await client.getProfile(userId);
+        const displayName = profile.displayName;
+        const keyword = extractKeyword(userText);
+        const chatResponse = await askChatGPT(userText, displayName);
 
-        await client.replyMessage(event.replyToken, {
-          type: "flex",
-          altText: "おすすめ商品を表示しています",
-          contents: {
-            type: "bubble",
-            body: {
-              type: "box",
-              layout: "vertical",
-              spacing: "md",
-              contents: [
-                { type: "text", text: reply.display, wrap: true },
-                {
-                  type: "box",
-                  layout: "vertical",
-                  spacing: "sm",
-                  contents: [
-                    {
-                      type: "button",
-                      style: "link",
-                      action: { type: "uri", label: "Amazonで探す", uri: links.amazon }
-                    },
-                    {
-                      type: "button",
-                      style: "link",
-                      action: { type: "uri", label: "楽天市場で探す", uri: links.rakuten }
+        const replyMessages = [
+          {
+            type: "flex",
+            altText: "商品リンクのご案内",
+            contents: {
+              type: "bubble",
+              body: {
+                type: "box",
+                layout: "vertical",
+                spacing: "md",
+                contents: [
+                  {
+                    type: "text",
+                    text: chatResponse,
+                    wrap: true
+                  }
+                ]
+              },
+              footer: {
+                type: "box",
+                layout: "vertical",
+                spacing: "sm",
+                contents: [
+                  {
+                    type: "button",
+                    style: "link",
+                    height: "sm",
+                    action: {
+                      type: "uri",
+                      label: "Amazonで検索",
+                      uri: `https://www.amazon.co.jp/s?k=${encodeURIComponent(keyword)}`
                     }
-                  ]
-                }
-              ]
+                  },
+                  {
+                    type: "button",
+                    style: "link",
+                    height: "sm",
+                    action: {
+                      type: "uri",
+                      label: "楽天市場で検索",
+                      uri: `https://search.rakuten.co.jp/search/mall/${encodeURIComponent(keyword)}`
+                    }
+                  }
+                ]
+              }
             }
           },
-          quickReply: {
-            items: quickReplies
+          {
+            type: "text",
+            text: "他にも気になることがあれば教えてくださいね。",
+            quickReply: {
+              items: generateQuickReplies(chatResponse)
+            }
           }
-        });
+        ];
+
+        await client.replyMessage(event.replyToken, replyMessages);
       } catch (err) {
-        console.error("ChatGPT API error:", err.message);
+        console.error("❌ Error:", err.response?.data || err.message);
         await client.replyMessage(event.replyToken, {
           type: "text",
-          text: "申し訳ありません、現在応答できません。"
+          text: "申し訳ありません。現在応答できません。"
         });
       }
     }
@@ -127,49 +99,65 @@ app.post("/webhook", middleware(config), async (req, res) => {
   res.sendStatus(200);
 });
 
-async function askChatGPT(text, userName, retryCount = 0) {
-  try {
-    const systemPrompt = buildSystemPrompt(userName);
-
-    const res = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: text }
-        ]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    const raw = res.data.choices[0].message.content.trim();
-
-    // 🔽 Amazon/Rakuten用キーワード抽出（例：最初の名詞または5文字程度）
-    const keyword = extractKeyword(text);
-    const display = `${userName}さん、ありがとうございます。${raw}`;
-    return { display, clean: raw, keyword };
-  } catch (error) {
-    if (error.response?.status === 429 && retryCount < 3) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      return askChatGPT(text, userName, retryCount + 1);
-    }
-    throw error;
-  }
-}
-
 function extractKeyword(text) {
-  const keyword = text.split(" ")[0] || "DIY";
-  return keyword.length > 20 ? keyword.slice(0, 20) : keyword;
+  const keywords = ["塗料", "壁紙", "クロス", "リメイクシート", "工具", "電動工具", "手工具", "接着剤", "断熱", "防水", "木材"];
+  for (const word of keywords) {
+    if (text.includes(word)) return word;
+  }
+  return text;
 }
 
-// ✅ Render対応
+function generateQuickReplies(responseText) {
+  const suggestions = [
+    "どれがおすすめ？",
+    "価格帯は？",
+    "成分や特徴は？",
+    "施工方法を教えて",
+    "必要な道具は？",
+    "初心者でも使える？",
+    "耐久性はどう？",
+    "使用上の注意は？",
+    "他に選択肢ある？",
+    "代替品は？"
+  ];
+
+  const items = suggestions.slice(0, 4).map(text => ({
+    type: "action",
+    action: {
+      type: "message",
+      label: text,
+      text: text
+    }
+  }));
+
+  return items;
+}
+
+async function askChatGPT(userText, displayName) {
+  const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。\n\nユーザーからの質問には、住宅内外の改修、工具、塗料、建材、施工方法などに関する専門的な知識を使って、正確で実用的な回答を行ってください。\n\n電動工具、手工具、設備交換、床・壁・天井の仕上げ材、接着剤、防水・断熱資材などの商品情報や使い方に詳しく説明してください。\n\nそれ以外の話題（例：料理、医療、エンタメ）には対応せず、「この分野については専門外のためお答えできません。」と返答してください。`; 
+
+  const userPrompt = `${displayName}さん、ありがとうございます。ご質問「${userText}」について、以下の通りお答えします。`;
+
+  const res = await axios.post(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      model: "gpt-3.5-turbo",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ]
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+  return res.data.choices[0].message.content.trim();
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ LINE Bot running on port ${PORT}`);
+  console.log(`✅ Bot running on port ${PORT}`);
 });
