@@ -1,3 +1,4 @@
+// LINE × ChatGPT DIY特化Bot：検索キーワード抽出型（Amazon・楽天リンク対応）
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
 const axios = require("axios");
@@ -5,7 +6,7 @@ require("dotenv").config();
 
 const app = express();
 
-// デバッグログでAPIキー確認
+// 環境変数読み込み確認ログ
 console.log("🔐 API KEY LOADED:", process.env.OPENAI_API_KEY ? "✅ Yes" : "❌ No");
 
 const config = {
@@ -24,8 +25,7 @@ app.post("/webhook", middleware(config), async (req, res) => {
 
       try {
         const reply = await askChatGPT(userText);
-        const flexMessage = createFlexMessage(userText, reply);
-        await client.replyMessage(event.replyToken, flexMessage);
+        await client.replyMessage(event.replyToken, reply);
       } catch (err) {
         console.error("ChatGPT API error:", err.response?.data || err.message);
         await client.replyMessage(event.replyToken, {
@@ -39,92 +39,28 @@ app.post("/webhook", middleware(config), async (req, res) => {
   res.sendStatus(200);
 });
 
-function generateSearchLinks(keyword) {
-  const encoded = encodeURIComponent(keyword.replace(/\s+/g, "+"));
-  return {
-    amazon: `https://www.amazon.co.jp/s?k=${encoded}`,
-    rakuten: `https://search.rakuten.co.jp/search/mall/${encoded}`
-  };
-}
-
-function createFlexMessage(keyword, replyText) {
-  const links = generateSearchLinks(keyword);
-  return {
-    type: "flex",
-    altText: "DIYアドバイスと商品検索リンク",
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        contents: [
-          {
-            type: "text",
-            text: "🛠 DIY・リフォーム アドバイス",
-            weight: "bold",
-            size: "md",
-            margin: "none"
-          },
-          {
-            type: "text",
-            text: replyText,
-            wrap: true,
-            margin: "md",
-            size: "sm"
-          }
-        ]
-      },
-      footer: {
-        type: "box",
-        layout: "horizontal",
-        spacing: "md",
-        contents: [
-          {
-            type: "button",
-            style: "link",
-            height: "sm",
-            action: {
-              type: "uri",
-              label: "Amazonで探す",
-              uri: links.amazon
-            }
-          },
-          {
-            type: "button",
-            style: "link",
-            height: "sm",
-            action: {
-              type: "uri",
-              label: "楽天市場で探す",
-              uri: links.rakuten
-            }
-          }
-        ],
-        flex: 0
-      }
-    }
-  };
-}
-
-async function askChatGPT(userInput, retryCount = 0) {
-  const systemPrompt = `
-あなたはDIYと住宅リフォームの専門家アシスタントです。
-住宅内外の改修、工具、塗料、建材、施工方法などに関する専門的な知識を使って、
-正確で実用的な回答を行ってください。説明は丁寧に、実践的で親切にお願いします。
-
-ただし、料理、エンタメ、医療などDIY以外の話題には
-「この分野については専門外のためお答えできません。」と答えてください。
-`;
-
+async function askChatGPT(userText, retryCount = 0) {
   try {
-    const openaiRes = await axios.post(
+    const messages = [
+      {
+        role: "system",
+        content: `あなたはDIYと住宅リフォームの専門家アシスタントです。
+以下の質問に対して、次のフォーマットで返答してください：
+
+1. 【アドバイス】最適な説明や使い方、施工方法などを専門的に、やさしく説明。
+2. 【検索キーワード】Amazon・楽天市場で検索するのに適した単語を1つまたは2つ（例：「塗料 白」や「クロス 壁紙」）。
+※検索キーワードはユーザーの意図に沿って実際の商品が探せるように工夫してください。
+※不要な語尾は省き、全角スペースを使わず、半角スペースまたは+で繋いでください。
+3. 【注意】DIY以外の質問には「専門外」と返してください。`
+      },
+      { role: "user", content: userText }
+    ];
+
+    const res = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
         model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userInput }
-        ]
+        messages
       },
       {
         headers: {
@@ -134,23 +70,42 @@ async function askChatGPT(userInput, retryCount = 0) {
       }
     );
 
-    return openaiRes.data.choices[0].message.content.trim();
+    const content = res.data.choices[0].message.content.trim();
+
+    // 検索キーワード抽出
+    const keywordMatch = content.match(/【検索キーワード】(.+)/);
+    const keyword = keywordMatch ? keywordMatch[1].trim() : null;
+
+    let additionalLinks = "";
+    if (keyword) {
+      const encoded = encodeURIComponent(keyword);
+      additionalLinks = `\n\n【Amazonで検索】https://www.amazon.co.jp/s?k=${encoded}` +
+                        `\n【楽天市場で検索】https://search.rakuten.co.jp/search/mall/${encoded}/`;
+    }
+
+    return {
+      type: "text",
+      text: content.replace(/【検索キーワード】.+/, "").trim() + additionalLinks
+    };
+
   } catch (error) {
     const status = error.response?.status;
 
     if (status === 429 && retryCount < 3) {
-      console.warn("⏳ 429 Too Many Requests - Retrying...");
+      console.warn("⏳ 429 Too Many Requests - Retrying in 2 seconds...");
       await new Promise(resolve => setTimeout(resolve, 2000));
-      return askChatGPT(userInput, retryCount + 1);
+      return askChatGPT(userText, retryCount + 1);
     } else {
       console.error("❌ ChatGPT API error:", status, error.response?.data || error.message);
-      return "申し訳ありません。現在応答できません。";
+      return {
+        type: "text",
+        text: "申し訳ありません。現在応答できません。"
+      };
     }
   }
 }
 
-// Render対応：環境変数PORT使用
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ LINE Bot running on port ${PORT}`);
+  console.log(`Bot running on port ${PORT}`);
 });
