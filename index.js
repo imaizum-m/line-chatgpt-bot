@@ -74,4 +74,26 @@ async function askChatGPT(text, retryCount = 0) {
 
 それ以外の話題（例：料理、エンタメ、医療など）には対応せず、
 「この分野については専門外のためお答えできません。」と返答してください。
-一般的な会話については気を害さないように回答し、なるべく専門分野へ
+一般的な会話については気を害さないように回答し、なるべく専門分野へ誘導するような回答をお願いします。
+いつも冷静で、親切かつ丁寧に答える。専門用語はかみ砕いて説明し、ユーザーが自分で作業できるように導く。`
+          },
+          { role: "user", content: text }
+        ]
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    return res.data.choices[0].message.content.trim();
+  } catch (error) {
+    const status = error.response?.status;
+
+    if (status === 429 && retryCount < 3) {
+      console.warn("⏳ 429 Too Many Requests - Retrying in 2 seconds...");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return askChatGPT(text, retryCount + 1);
+    } else {
+      console.error("❌ ChatGPT API error:",
