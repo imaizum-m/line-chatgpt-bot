@@ -1,9 +1,13 @@
+// LINE Flex Message（画像なし）でAmazon検索結果を返信するNode.jsコード（完全版）
+
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
 const axios = require("axios");
 require("dotenv").config();
 
 const app = express();
+
+console.log("🔐 API KEY LOADED:", process.env.OPENAI_API_KEY ? "✅ Yes" : "❌ No");
 
 const config = {
   channelAccessToken: process.env.LINE_ACCESS_TOKEN,
@@ -21,16 +25,9 @@ app.post("/webhook", middleware(config), async (req, res) => {
 
       try {
         const reply = await askChatGPT(userText);
-        const amazonUrl = generateAmazonLink(userText);
+        const flexMessage = createFlexMessage(userText, reply);
 
-        const fullReply = `${reply}
-
-【Amazonで「${userText}」を検索する】(${amazonUrl})`;
-
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: fullReply.length > 2000 ? fullReply.slice(0, 1990) + '...（省略）' : fullReply
-        });
+        await client.replyMessage(event.replyToken, flexMessage);
       } catch (err) {
         console.error("ChatGPT API error:", err.response?.data || err.message);
         await client.replyMessage(event.replyToken, {
@@ -45,13 +42,7 @@ app.post("/webhook", middleware(config), async (req, res) => {
 });
 
 async function askChatGPT(text, retryCount = 0) {
-  const systemPrompt = `
-あなたはDIYと住宅リフォームの専門家アシスタントです。
-ユーザーからの質問には、住宅内外の改修、工具、塗料、建材、施工方法などに関する専門的な知識を使って、正確で実用的な回答を行ってください。
-関連商品がAmazonにある可能性がある場合は、次の形式でリンクを案内してください：
-【Amazonで「○○」を検索する】(https://www.amazon.co.jp/s?k=○○)。
-他ジャンルの話題には「この分野については専門外のためお答えできません。」と返答してください。
-`; 
+  const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。\n\nユーザーからの質問には、住宅内外の改修、工具、塗料、建材、施工方法などに関する専門的な知識を使って、正確で実用的な回答を行ってください。\n\n該当商品がAmazonにある可能性がある場合は必ず以下のようにAmazon検索リンクを提供してください：\n\n【Amazonで「○○」を検索する】(https://www.amazon.co.jp/s?k=○○)\n\nそれ以外の話題には対応せず、「この分野については専門外のためお答えできません。」と返答してください。`;
 
   try {
     const res = await axios.post(
@@ -72,21 +63,69 @@ async function askChatGPT(text, retryCount = 0) {
     );
     return res.data.choices[0].message.content.trim();
   } catch (error) {
-    if (error.response?.status === 429 && retryCount < 3) {
+    const status = error.response?.status;
+    if (status === 429 && retryCount < 3) {
+      console.warn("⏳ 429 Too Many Requests - Retrying...");
       await new Promise(resolve => setTimeout(resolve, 2000));
       return askChatGPT(text, retryCount + 1);
     } else {
+      console.error("❌ ChatGPT API error:", status, error.response?.data || error.message);
       return "申し訳ありません。現在応答できません。";
     }
   }
 }
 
-function generateAmazonLink(keyword) {
-  const encoded = encodeURIComponent(keyword.replace(/\s+/g, "+"));
-  return `https://www.amazon.co.jp/s?k=${encoded}`;
+function createFlexMessage(keyword, replyText) {
+  const encodedKeyword = encodeURIComponent(keyword.replace(/\s+/g, "+"));
+  const amazonUrl = `https://www.amazon.co.jp/s?k=${encodedKeyword}`;
+
+  return {
+    type: "flex",
+    altText: "検索結果です",
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        contents: [
+          {
+            type: "text",
+            text: `${keyword} の検索結果`,
+            weight: "bold",
+            size: "md",
+            wrap: true
+          },
+          {
+            type: "text",
+            text: replyText,
+            wrap: true,
+            size: "sm",
+            margin: "md"
+          }
+        ]
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            action: {
+              type: "uri",
+              label: "Amazonで検索",
+              uri: amazonUrl
+            },
+            style: "primary"
+          }
+        ],
+        flex: 0
+      }
+    }
+  };
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Bot running on port ${PORT}`);
+  console.log(`Bot running on port ${PORT}`);
 });
