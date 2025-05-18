@@ -1,66 +1,51 @@
-// LINE Bot with OpenAI integration (Ver.1.6.1 - based on Ver.1.5.1)
-// - Stable base maintained
-// - Enhanced Quick Reply with dynamic keyword extraction for product search buttons
-
+// Ver.1.6.1
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
 const axios = require("axios");
 require("dotenv").config();
 
 const app = express();
-app.use(express.json());
+
+// 🔧 rawBody を取得して LINE の署名検証に使用
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
 
 const config = {
   channelAccessToken: process.env.LINE_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_SECRET,
+  channelSecret: process.env.LINE_SECRET
 };
 
 const client = new Client(config);
 
-// ✅ Logging loaded API key (only for dev check)
-console.log("🔐 OPENAI KEY LOADED:", process.env.OPENAI_API_KEY ? "✅" : "❌");
-
-// Utility to extract keyword from OpenAI response for search links
-function extractSearchKeyword(text) {
-  const match = text.match(/\u300c(.+?)\u300d|"(.+?)"|\[(.+?)\]/);
-  return match ? (match[1] || match[2] || match[3]) : null;
-}
-
-// Generate Amazon/Rakuten links from keywords
-function generateSearchLinks(keyword) {
-  if (!keyword) return [];
-  const encoded = encodeURIComponent(keyword.replace(/\s+/g, "+"));
+// 🔍 Amazon・楽天URL生成（キーワードをエンコード）
+function generateShoppingLinks(keyword) {
+  const encoded = encodeURIComponent(keyword);
   return [
     {
-      type: "uri",
-      label: "Amazonで検索",
-      uri: `https://www.amazon.co.jp/s?k=${encoded}`,
+      type: "button",
+      action: {
+        type: "uri",
+        label: "Amazonで探す",
+        uri: `https://www.amazon.co.jp/s?k=${encoded}`
+      }
     },
     {
-      type: "uri",
-      label: "楽天市場で検索",
-      uri: `https://search.rakuten.co.jp/search/mall/${encoded}`,
-    },
+      type: "button",
+      action: {
+        type: "uri",
+        label: "楽天市場で探す",
+        uri: `https://search.rakuten.co.jp/search/mall/${encoded}/`
+      }
+    }
   ];
 }
 
-// Create Quick Reply buttons from ChatGPT suggestion
-function generateQuickReplies(choices) {
-  return {
-    items: choices.slice(0, 4).map((label) => ({
-      type: "action",
-      action: {
-        type: "message",
-        label,
-        text: label,
-      },
-    })),
-  };
-}
-
-// Ask OpenAI and process response
-async function askChatGPT(userName, userText) {
-  const systemPrompt = `あなたはDIYと住宅リフォームの専門アシスタントです。会話は親切かつ冷静に。専門外の話題には対応せず、専門分野へ誘導してください。商品名や用途に応じてAmazon・楽天検索リンクを案内してください。`;
+// 🤖 ChatGPTに質問
+async function askChatGPT(userText) {
+  const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。...（省略可能）`;
 
   const res = await axios.post(
     "https://api.openai.com/v1/chat/completions",
@@ -68,52 +53,53 @@ async function askChatGPT(userName, userText) {
       model: "gpt-3.5-turbo",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userText },
-      ],
-      temperature: 0.7,
+        { role: "user", content: userText }
+      ]
     },
     {
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+        "Content-Type": "application/json"
+      }
     }
   );
+  return res.data.choices[0].message.content.trim();
+}
 
-  const replyContent = res.data.choices[0].message.content.trim();
-  const keyword = extractSearchKeyword(replyContent) || userText;
-  const links = generateSearchLinks(keyword);
+// 🤖 ChatGPTにQuick Reply文を作成依頼
+async function generateQuickReplies(userText, replyText) {
+  const prompt = `以下の回答内容に基づき、ユーザーが次に聞きたくなりそうな質問を4つ考えて、JSON形式で出力して。例：「成分や特徴は？」「もっと安い選択肢ある？」
 
-  // Suggest related prompts based on original question
-  const suggestionPrompt = `「${userText}」という質問に答えた後、より深掘りできる質問を4件、日本語で短く教えてください。`;
-  const sugRes = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: suggestionPrompt },
-      ],
-      temperature: 0.7,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+回答内容:
+${replyText}`;
+
+  try {
+    const res = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-3.5-turbo",
+        messages: [
+          { role: "system", content: "JSON配列で返してください。" },
+          { role: "user", content: prompt }
+        ]
       },
-    }
-  );
-
-  const suggestions = sugRes.data.choices[0].message.content
-    .split("\n")
-    .map((line) => line.replace(/^\d+\.\s*/, "").trim())
-    .filter((line) => line);
-
-  return {
-    message: `${userName}さん、ありがとうございます。以下の情報をご覧ください：\n\n${replyContent}`,
-    links,
-    quickReplies: suggestions,
-  };
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    const raw = res.data.choices[0].message.content.trim();
+    const quickList = JSON.parse(raw);
+    return quickList.map(q => ({
+      type: "action",
+      action: { type: "message", label: q, text: q }
+    })).slice(0, 4);
+  } catch (e) {
+    console.warn("QuickReply生成失敗", e.message);
+    return [];
+  }
 }
 
 app.post("/webhook", middleware(config), async (req, res) => {
@@ -122,22 +108,20 @@ app.post("/webhook", middleware(config), async (req, res) => {
   for (const event of events) {
     if (event.type === "message" && event.message.type === "text") {
       const userText = event.message.text;
-      const userId = event.source.userId;
-      let userName = "お客様";
+      const userId = event.source.userId || "ユーザー";
 
       try {
-        const profile = await client.getProfile(userId);
-        if (profile.displayName) userName = profile.displayName;
-      } catch (e) {
-        console.warn("ユーザー名取得エラー:", e.message);
-      }
+        const replyText = await askChatGPT(userText);
 
-      try {
-        const { message, links, quickReplies } = await askChatGPT(userName, userText);
+        const keywordMatch = replyText.match(/(?:「|『)?([\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}a-zA-Z0-9\s]{2,})(?:」|』)?/u);
+        const keyword = keywordMatch ? keywordMatch[1] : userText;
 
-        await client.replyMessage(event.replyToken, {
+        const quickReply = await generateQuickReplies(userText, replyText);
+        const buttons = generateShoppingLinks(keyword);
+
+        const message = {
           type: "flex",
-          altText: "回答メッセージ",
+          altText: "おすすめ商品を表示します",
           contents: {
             type: "bubble",
             body: {
@@ -146,41 +130,34 @@ app.post("/webhook", middleware(config), async (req, res) => {
               contents: [
                 {
                   type: "text",
-                  text: message,
-                  wrap: true,
-                  size: "sm",
+                  text: `${userId}さん、ありがとうございます！\n${replyText}`,
+                  wrap: true
                 },
-              ],
-            },
-            footer: {
-              type: "box",
-              layout: "horizontal",
-              spacing: "sm",
-              contents: links.map((btn) => ({
-                type: "button",
-                style: "primary",
-                height: "sm",
-                action: btn,
-              })),
-              flex: 0,
-            },
+                ...buttons
+              ]
+            }
           },
-          quickReply: generateQuickReplies(quickReplies),
-        });
+          quickReply: {
+            items: quickReply
+          }
+        };
+
+        await client.replyMessage(event.replyToken, message);
       } catch (err) {
-        console.error("ChatGPT APIエラー:", err.message);
+        console.error("❌ エラー:", err.message);
         await client.replyMessage(event.replyToken, {
           type: "text",
-          text: "申し訳ありません。現在応答できません。しばらくして再度お試しください。",
+          text: "申し訳ありません。現在応答できません。"
         });
       }
     }
   }
+
   res.sendStatus(200);
 });
 
-// Port binding for Render.com or localhost
+// ✅ ポート設定
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Bot running on port ${PORT}`);
+  console.log(`🤖 Bot running on port ${PORT}`);
 });
