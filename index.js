@@ -26,7 +26,7 @@ app.post("/webhook", middleware(config), async (req, res) => {
           text: reply
         });
       } catch (err) {
-        console.error("ChatGPT API error:", err.message);
+        console.error("ChatGPT API error:", err.response?.data || err.message);
         await client.replyMessage(event.replyToken, {
           type: "text",
           text: "申し訳ありません。現在応答できません。"
@@ -38,21 +38,34 @@ app.post("/webhook", middleware(config), async (req, res) => {
   res.sendStatus(200);
 });
 
-async function askChatGPT(text) {
-  const res = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-3.5-turbo",
-      messages: [{ role: "user", content: text }]
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
+async function askChatGPT(text, retryCount = 0) {
+  try {
+    const res = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-3.5-turbo",
+        messages: [{ role: "user", content: text }]
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        }
       }
+    );
+    return res.data.choices[0].message.content.trim();
+  } catch (error) {
+    const status = error.response?.status;
+
+    if (status === 429 && retryCount < 3) {
+      console.warn("⏳ 429 Too Many Requests - Retrying in 2 seconds...");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return askChatGPT(text, retryCount + 1);
+    } else {
+      console.error("❌ ChatGPT API error:", status, error.response?.data || error.message);
+      throw error;
     }
-  );
-  return res.data.choices[0].message.content.trim();
+  }
 }
 
 // Render環境対応（PORTが動的）
