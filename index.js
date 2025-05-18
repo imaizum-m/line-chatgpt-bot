@@ -1,19 +1,15 @@
-// LINE × ChatGPT DIY特化Bot：検索キーワード抽出型（Amazon・楽天リンク対応）
+// LINE × ChatGPT × DIY Bot（Flex Message使用・サムネイルなし）
+
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
 const axios = require("axios");
 require("dotenv").config();
 
 const app = express();
-
-// 環境変数読み込み確認ログ
-console.log("🔐 API KEY LOADED:", process.env.OPENAI_API_KEY ? "✅ Yes" : "❌ No");
-
 const config = {
   channelAccessToken: process.env.LINE_ACCESS_TOKEN,
   channelSecret: process.env.LINE_SECRET
 };
-
 const client = new Client(config);
 
 app.post("/webhook", middleware(config), async (req, res) => {
@@ -22,10 +18,73 @@ app.post("/webhook", middleware(config), async (req, res) => {
   for (const event of events) {
     if (event.type === "message" && event.message.type === "text") {
       const userText = event.message.text;
-
       try {
-        const reply = await askChatGPT(userText);
-        await client.replyMessage(event.replyToken, reply);
+        const gptReply = await askChatGPT(userText);
+        const keyword = extractKeywordForSearch(gptReply);
+        const encoded = encodeURIComponent(keyword);
+
+        const amazonUrl = `https://www.amazon.co.jp/s?k=${encoded}`;
+        const rakutenUrl = `https://search.rakuten.co.jp/search/mall/${encoded}/`;
+
+        const message = {
+          type: "flex",
+          altText: "検索結果のご案内",
+          contents: {
+            type: "bubble",
+            body: {
+              type: "box",
+              layout: "vertical",
+              contents: [
+                {
+                  type: "text",
+                  text: "🔧 DIYアドバイス",
+                  weight: "bold",
+                  size: "md",
+                  margin: "none"
+                },
+                {
+                  type: "text",
+                  text: gptReply,
+                  wrap: true,
+                  margin: "md",
+                  size: "sm"
+                },
+                {
+                  type: "separator",
+                  margin: "md"
+                },
+                {
+                  type: "box",
+                  layout: "horizontal",
+                  spacing: "md",
+                  margin: "md",
+                  contents: [
+                    {
+                      type: "button",
+                      style: "link",
+                      action: {
+                        type: "uri",
+                        label: "Amazonで検索",
+                        uri: amazonUrl
+                      }
+                    },
+                    {
+                      type: "button",
+                      style: "link",
+                      action: {
+                        type: "uri",
+                        label: "楽天市場で検索",
+                        uri: rakutenUrl
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        };
+
+        await client.replyMessage(event.replyToken, message);
       } catch (err) {
         console.error("ChatGPT API error:", err.response?.data || err.message);
         await client.replyMessage(event.replyToken, {
@@ -39,28 +98,17 @@ app.post("/webhook", middleware(config), async (req, res) => {
   res.sendStatus(200);
 });
 
-async function askChatGPT(userText, retryCount = 0) {
+async function askChatGPT(text, retryCount = 0) {
+  const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。ユーザーからの質問には、住宅内外の改修、工具、塗料、建材、施工方法などに関する専門的な知識を使って、正確で実用的な回答を行ってください。商品が特定できる場合は、検索キーワードも一緒に提供してください。ただし、料理や医療などDIYと関係のない話題には「専門外」として丁寧に断ってください。`;
   try {
-    const messages = [
-      {
-        role: "system",
-        content: `あなたはDIYと住宅リフォームの専門家アシスタントです。
-以下の質問に対して、次のフォーマットで返答してください：
-
-1. 【アドバイス】最適な説明や使い方、施工方法などを専門的に、やさしく説明。
-2. 【検索キーワード】Amazon・楽天市場で検索するのに適した単語を1つまたは2つ（例：「塗料 白」や「クロス 壁紙」）。
-※検索キーワードはユーザーの意図に沿って実際の商品が探せるように工夫してください。
-※不要な語尾は省き、全角スペースを使わず、半角スペースまたは+で繋いでください。
-3. 【注意】DIY以外の質問には「専門外」と返してください。`
-      },
-      { role: "user", content: userText }
-    ];
-
     const res = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
         model: "gpt-3.5-turbo",
-        messages
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: text }
+        ]
       },
       {
         headers: {
@@ -69,43 +117,24 @@ async function askChatGPT(userText, retryCount = 0) {
         }
       }
     );
-
-    const content = res.data.choices[0].message.content.trim();
-
-    // 検索キーワード抽出
-    const keywordMatch = content.match(/【検索キーワード】(.+)/);
-    const keyword = keywordMatch ? keywordMatch[1].trim() : null;
-
-    let additionalLinks = "";
-    if (keyword) {
-      const encoded = encodeURIComponent(keyword);
-      additionalLinks = `\n\n【Amazonで検索】https://www.amazon.co.jp/s?k=${encoded}` +
-                        `\n【楽天市場で検索】https://search.rakuten.co.jp/search/mall/${encoded}/`;
-    }
-
-    return {
-      type: "text",
-      text: content.replace(/【検索キーワード】.+/, "").trim() + additionalLinks
-    };
-
+    return res.data.choices[0].message.content.trim();
   } catch (error) {
-    const status = error.response?.status;
-
-    if (status === 429 && retryCount < 3) {
-      console.warn("⏳ 429 Too Many Requests - Retrying in 2 seconds...");
+    if (error.response?.status === 429 && retryCount < 3) {
+      console.warn("429 Too Many Requests - Retrying in 2s...");
       await new Promise(resolve => setTimeout(resolve, 2000));
-      return askChatGPT(userText, retryCount + 1);
-    } else {
-      console.error("❌ ChatGPT API error:", status, error.response?.data || error.message);
-      return {
-        type: "text",
-        text: "申し訳ありません。現在応答できません。"
-      };
+      return askChatGPT(text, retryCount + 1);
     }
+    return "現在回答できません。しばらくしてから再度お試しください。";
   }
+}
+
+function extractKeywordForSearch(replyText) {
+  // 単純な正規表現抽出例（改善可能）
+  const keywordMatch = replyText.match(/「(.+?)」|\b(塗料|壁紙|クロス|接着剤|工具|断熱|防水|木材)\b/);
+  return keywordMatch ? keywordMatch[1] || keywordMatch[0] : "DIY 道具";
 }
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Bot running on port ${PORT}`);
+  console.log(`✅ LINE DIY Bot running on port ${PORT}`);
 });
