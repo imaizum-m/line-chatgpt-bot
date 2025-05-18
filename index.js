@@ -1,103 +1,177 @@
-// 📦 必要なモジュールの読み込み
+// LINE Bot with OpenAI integration (Ver.1.6.1 - based on Ver.1.5.1)
+// - Stable base maintained
+// - Enhanced Quick Reply with dynamic keyword extraction for product search buttons
+
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
 const axios = require("axios");
-const bodyParser = require("body-parser");
 require("dotenv").config();
 
 const app = express();
+app.use(express.json());
 
-// 🔧 rawBodyを保持するミドルウェア（LINE署名検証用）
-app.use(bodyParser.json({
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
-  }
-}));
-
-// ✅ LINE BOT設定
 const config = {
   channelAccessToken: process.env.LINE_ACCESS_TOKEN,
-  channelSecret: process.env.LINE_SECRET
+  channelSecret: process.env.LINE_SECRET,
 };
 
 const client = new Client(config);
 
-// 🔁 LINE Webhook受信
-app.post("/webhook", (req, res, next) => {
-  middleware(config)(req, res, next);
-}, async (req, res) => {
+// ✅ Logging loaded API key (only for dev check)
+console.log("🔐 OPENAI KEY LOADED:", process.env.OPENAI_API_KEY ? "✅" : "❌");
+
+// Utility to extract keyword from OpenAI response for search links
+function extractSearchKeyword(text) {
+  const match = text.match(/\u300c(.+?)\u300d|"(.+?)"|\[(.+?)\]/);
+  return match ? (match[1] || match[2] || match[3]) : null;
+}
+
+// Generate Amazon/Rakuten links from keywords
+function generateSearchLinks(keyword) {
+  if (!keyword) return [];
+  const encoded = encodeURIComponent(keyword.replace(/\s+/g, "+"));
+  return [
+    {
+      type: "uri",
+      label: "Amazonで検索",
+      uri: `https://www.amazon.co.jp/s?k=${encoded}`,
+    },
+    {
+      type: "uri",
+      label: "楽天市場で検索",
+      uri: `https://search.rakuten.co.jp/search/mall/${encoded}`,
+    },
+  ];
+}
+
+// Create Quick Reply buttons from ChatGPT suggestion
+function generateQuickReplies(choices) {
+  return {
+    items: choices.slice(0, 4).map((label) => ({
+      type: "action",
+      action: {
+        type: "message",
+        label,
+        text: label,
+      },
+    })),
+  };
+}
+
+// Ask OpenAI and process response
+async function askChatGPT(userName, userText) {
+  const systemPrompt = `あなたはDIYと住宅リフォームの専門アシスタントです。会話は親切かつ冷静に。専門外の話題には対応せず、専門分野へ誘導してください。商品名や用途に応じてAmazon・楽天検索リンクを案内してください。`;
+
+  const res = await axios.post(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      model: "gpt-3.5-turbo",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userText },
+      ],
+      temperature: 0.7,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  const replyContent = res.data.choices[0].message.content.trim();
+  const keyword = extractSearchKeyword(replyContent) || userText;
+  const links = generateSearchLinks(keyword);
+
+  // Suggest related prompts based on original question
+  const suggestionPrompt = `「${userText}」という質問に答えた後、より深掘りできる質問を4件、日本語で短く教えてください。`;
+  const sugRes = await axios.post(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      model: "gpt-3.5-turbo",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: suggestionPrompt },
+      ],
+      temperature: 0.7,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  const suggestions = sugRes.data.choices[0].message.content
+    .split("\n")
+    .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+    .filter((line) => line);
+
+  return {
+    message: `${userName}さん、ありがとうございます。以下の情報をご覧ください：\n\n${replyContent}`,
+    links,
+    quickReplies: suggestions,
+  };
+}
+
+app.post("/webhook", middleware(config), async (req, res) => {
   const events = req.body.events;
 
   for (const event of events) {
     if (event.type === "message" && event.message.type === "text") {
       const userText = event.message.text;
       const userId = event.source.userId;
-      let userName = "あなた";
+      let userName = "お客様";
 
       try {
-        // ✅ ユーザー名取得（エラー時は無視）
         const profile = await client.getProfile(userId);
-        userName = profile.displayName || userName;
-      } catch (e) {}
+        if (profile.displayName) userName = profile.displayName;
+      } catch (e) {
+        console.warn("ユーザー名取得エラー:", e.message);
+      }
 
       try {
-        const gptResponse = await askChatGPT(userText);
-        const searchKeyword = extractKeyword(gptResponse);
-        const amazonUrl = `https://www.amazon.co.jp/s?k=${encodeURIComponent(searchKeyword)}`;
-        const rakutenUrl = `https://search.rakuten.co.jp/search/mall/${encodeURIComponent(searchKeyword)}/`;
+        const { message, links, quickReplies } = await askChatGPT(userName, userText);
 
-        const quickReplies = generateQuickReplies(gptResponse);
-
-        // ✅ Flex Message形式で送信（ボタン付き）
         await client.replyMessage(event.replyToken, {
           type: "flex",
-          altText: "おすすめ商品リンク",
+          altText: "回答メッセージ",
           contents: {
             type: "bubble",
             body: {
               type: "box",
               layout: "vertical",
               contents: [
-                { type: "text", text: `${userName}さん、${gptResponse}`, wrap: true },
                 {
-                  type: "box",
-                  layout: "horizontal",
-                  spacing: "md",
-                  contents: [
-                    {
-                      type: "button",
-                      style: "primary",
-                      height: "sm",
-                      action: {
-                        type: "uri",
-                        label: "Amazonで検索",
-                        uri: amazonUrl
-                      }
-                    },
-                    {
-                      type: "button",
-                      style: "secondary",
-                      height: "sm",
-                      action: {
-                        type: "uri",
-                        label: "楽天で検索",
-                        uri: rakutenUrl
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
+                  type: "text",
+                  text: message,
+                  wrap: true,
+                  size: "sm",
+                },
+              ],
+            },
+            footer: {
+              type: "box",
+              layout: "horizontal",
+              spacing: "sm",
+              contents: links.map((btn) => ({
+                type: "button",
+                style: "primary",
+                height: "sm",
+                action: btn,
+              })),
+              flex: 0,
+            },
           },
-          quickReply: {
-            items: quickReplies
-          }
+          quickReply: generateQuickReplies(quickReplies),
         });
       } catch (err) {
-        console.error("❌ ChatGPT API error:", err);
+        console.error("ChatGPT APIエラー:", err.message);
         await client.replyMessage(event.replyToken, {
           type: "text",
-          text: "申し訳ありません。現在応答できません。"
+          text: "申し訳ありません。現在応答できません。しばらくして再度お試しください。",
         });
       }
     }
@@ -105,61 +179,7 @@ app.post("/webhook", (req, res, next) => {
   res.sendStatus(200);
 });
 
-// 🔧 ChatGPT API呼び出し
-async function askChatGPT(text) {
-  const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。\n質問には正確で実用的に、かつ商品検索用リンクも示してください。その他ジャンルの質問には「専門外です」と返してください。`;
-
-  const res = await axios.post("https://api.openai.com/v1/chat/completions", {
-    model: "gpt-3.5-turbo",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: text }
-    ]
-  }, {
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    }
-  });
-
-  return res.data.choices[0].message.content.trim();
-}
-
-// 🔍 キーワード抽出関数（最もシンプルな方法）
-function extractKeyword(text) {
-  const candidates = ["塗料", "壁紙", "工具", "接着剤", "木材", "クロス", "断熱", "防水"];
-  for (const word of candidates) {
-    if (text.includes(word)) return word;
-  }
-  return text.split("\n")[0].slice(0, 20); // fallback
-}
-
-// 🧠 Quick Reply生成
-function generateQuickReplies(responseText) {
-  const examples = [
-    "他の選択肢もありますか？",
-    "成分や特徴を詳しく教えて",
-    "施工方法は？",
-    "初心者でも使える？",
-    "おすすめの組み合わせは？",
-    "必要な道具は？",
-    "価格帯の目安は？",
-    "注意点は？",
-    "プロ用との違いは？",
-    "どこで買える？"
-  ];
-  const picks = examples.sort(() => 0.5 - Math.random()).slice(0, 4);
-  return picks.map(msg => ({
-    type: "action",
-    action: {
-      type: "message",
-      label: msg,
-      text: msg
-    }
-  }));
-}
-
-// 🚀 ポート起動
+// Port binding for Render.com or localhost
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Bot running on port ${PORT}`);
