@@ -1,17 +1,11 @@
-// Ver.1.6.1
+// Ver.1.6.2
 const express = require("express");
 const { Client, middleware } = require("@line/bot-sdk");
 const axios = require("axios");
 require("dotenv").config();
 
 const app = express();
-
-// 🔧 rawBody を取得して LINE の署名検証に使用
-app.use(express.json({
-  verify: (req, res, buf) => {
-    req.rawBody = buf.toString();
-  }
-}));
+app.use(express.json());
 
 const config = {
   channelAccessToken: process.env.LINE_ACCESS_TOKEN,
@@ -19,88 +13,6 @@ const config = {
 };
 
 const client = new Client(config);
-
-// 🔍 Amazon・楽天URL生成（キーワードをエンコード）
-function generateShoppingLinks(keyword) {
-  const encoded = encodeURIComponent(keyword);
-  return [
-    {
-      type: "button",
-      action: {
-        type: "uri",
-        label: "Amazonで探す",
-        uri: `https://www.amazon.co.jp/s?k=${encoded}`
-      }
-    },
-    {
-      type: "button",
-      action: {
-        type: "uri",
-        label: "楽天市場で探す",
-        uri: `https://search.rakuten.co.jp/search/mall/${encoded}/`
-      }
-    }
-  ];
-}
-
-// 🤖 ChatGPTに質問
-async function askChatGPT(userText) {
-  const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。...（省略可能）`;
-
-  const res = await axios.post(
-    "https://api.openai.com/v1/chat/completions",
-    {
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userText }
-      ]
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-  return res.data.choices[0].message.content.trim();
-}
-
-// 🤖 ChatGPTにQuick Reply文を作成依頼
-async function generateQuickReplies(userText, replyText) {
-  const prompt = `以下の回答内容に基づき、ユーザーが次に聞きたくなりそうな質問を4つ考えて、JSON形式で出力して。例：「成分や特徴は？」「もっと安い選択肢ある？」
-
-回答内容:
-${replyText}`;
-
-  try {
-    const res = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: "JSON配列で返してください。" },
-          { role: "user", content: prompt }
-        ]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-    const raw = res.data.choices[0].message.content.trim();
-    const quickList = JSON.parse(raw);
-    return quickList.map(q => ({
-      type: "action",
-      action: { type: "message", label: q, text: q }
-    })).slice(0, 4);
-  } catch (e) {
-    console.warn("QuickReply生成失敗", e.message);
-    return [];
-  }
-}
 
 app.post("/webhook", middleware(config), async (req, res) => {
   const events = req.body.events;
@@ -111,40 +23,17 @@ app.post("/webhook", middleware(config), async (req, res) => {
       const userId = event.source.userId || "ユーザー";
 
       try {
-        const replyText = await askChatGPT(userText);
+        const replyData = await askChatGPT(userText, userId);
+        const quickReplyItems = parseQuickReply(replyData.quickReply);
 
-        const keywordMatch = replyText.match(/(?:「|『)?([\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}a-zA-Z0-9\s]{2,})(?:」|』)?/u);
-        const keyword = keywordMatch ? keywordMatch[1] : userText;
-
-        const quickReply = await generateQuickReplies(userText, replyText);
-        const buttons = generateShoppingLinks(keyword);
-
-        const message = {
+        await client.replyMessage(event.replyToken, {
           type: "flex",
-          altText: "おすすめ商品を表示します",
-          contents: {
-            type: "bubble",
-            body: {
-              type: "box",
-              layout: "vertical",
-              contents: [
-                {
-                  type: "text",
-                  text: `${userId}さん、ありがとうございます！\n${replyText}`,
-                  wrap: true
-                },
-                ...buttons
-              ]
-            }
-          },
-          quickReply: {
-            items: quickReply
-          }
-        };
-
-        await client.replyMessage(event.replyToken, message);
+          altText: "商品検索リンク",
+          contents: createFlexMessage(replyData.text, replyData.searchWord),
+          quickReply: quickReplyItems.length > 0 ? { items: quickReplyItems } : undefined
+        });
       } catch (err) {
-        console.error("❌ エラー:", err.message);
+        console.error("ChatGPT API error:", err.response?.data || err.message);
         await client.replyMessage(event.replyToken, {
           type: "text",
           text: "申し訳ありません。現在応答できません。"
@@ -156,8 +45,135 @@ app.post("/webhook", middleware(config), async (req, res) => {
   res.sendStatus(200);
 });
 
-// ✅ ポート設定
+function parseQuickReply(raw) {
+  if (!raw) return [];
+
+  let jsonText = raw;
+  if (typeof raw === "string") {
+    jsonText = raw.replace(/```json/g, "").replace(/```/g, "").trim();
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText);
+    return Array.isArray(parsed)
+      ? parsed.map(label => ({
+          type: "action",
+          action: { type: "message", label, text: label }
+        }))
+      : [];
+  } catch (e) {
+    console.warn("⚠️ QuickReply JSON parse error:", e.message);
+    return [];
+  }
+}
+
+function createFlexMessage(answer, keyword) {
+  const encoded = encodeURIComponent(keyword);
+  return {
+    type: "bubble",
+    body: {
+      type: "box",
+      layout: "vertical",
+      contents: [
+        { type: "text", text: answer, wrap: true }
+      ]
+    },
+    footer: {
+      type: "box",
+      layout: "horizontal",
+      spacing: "sm",
+      contents: [
+        {
+          type: "button",
+          style: "link",
+          height: "sm",
+          action: {
+            type: "uri",
+            label: "Amazonで検索",
+            uri: `https://www.amazon.co.jp/s?k=${encoded}`
+          }
+        },
+        {
+          type: "button",
+          style: "link",
+          height: "sm",
+          action: {
+            type: "uri",
+            label: "楽天市場で検索",
+            uri: `https://search.rakuten.co.jp/search/mall/${encoded}`
+          }
+        }
+      ],
+      flex: 0
+    }
+  };
+}
+
+async function askChatGPT(text, userId, retryCount = 0) {
+  try {
+    const systemPrompt = `あなたはDIYと住宅リフォームの専門家アシスタントです。...（省略可能）...`;
+    const res = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: text }
+        ],
+        functions: [
+          {
+            name: "extract_search_word",
+            description: "回答の要点からAmazon・楽天市場検索用のキーワードを抽出する",
+            parameters: {
+              type: "object",
+              properties: {
+                searchWord: { type: "string", description: "検索キーワード" },
+                quickReply: {
+                  type: "array",
+                  description: "ユーザーが次に聞きたくなる関連質問",
+                  items: { type: "string" }
+                }
+              },
+              required: ["searchWord"]
+            }
+          }
+        ],
+        function_call: { name: "extract_search_word" }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    const replyText = res.data.choices[0]?.message?.content?.trim() || "";
+    const fnCall = res.data.choices[0]?.message?.function_call;
+    const args = JSON.parse(fnCall?.arguments || "{}");
+
+    return {
+      text: `${userId}さん、ありがとうございます。${replyText}`,
+      searchWord: args.searchWord || text,
+      quickReply: JSON.stringify(args.quickReply || [])
+    };
+  } catch (error) {
+    if (error.response?.status === 429 && retryCount < 3) {
+      console.warn("⏳ Rate limit hit, retrying...");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return askChatGPT(text, userId, retryCount + 1);
+    } else {
+      console.error("ChatGPT error:", error.response?.data || error.message);
+      return {
+        text: "申し訳ありません。現在応答できません。",
+        searchWord: text,
+        quickReply: []
+      };
+    }
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🤖 Bot running on port ${PORT}`);
+  console.log(`Bot running on port ${PORT}`);
 });
